@@ -1,0 +1,256 @@
+# ═══════════════════════════════════════════════════════════════
+# TUNISYS ATS — Stack 100% on-premise (aucun service cloud requis)
+# ═══════════════════════════════════════════════════════════════
+
+networks:
+  tunisys-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  mongo-data:
+  redis-data:
+  es-data:
+  ollama-data:
+  kafka-data:
+
+services:
+
+  # ─────────── BASE RELATIONNELLE ───────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tunisys-postgres
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tunisys_ats}
+      POSTGRES_USER: ${POSTGRES_USER:-tunisys}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tunisys_dev_pwd}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backend/src/main/resources/db/init:/docker-entrypoint-initdb.d
+    networks: [tunisys-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tunisys} -d ${POSTGRES_DB:-tunisys_ats}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ─────────── DOCUMENTS (CV bruts / parsés) ───────────
+  mongo:
+    image: mongo:7
+    container_name: tunisys-mongo
+    restart: unless-stopped
+    init: true
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-tunisys}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-tunisys_dev_pwd}
+      MONGO_INITDB_DATABASE: tunisys_cv
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks: [tunisys-net]
+
+  # ─────────── CACHE / SESSIONS / LOCKS ───────────
+  redis:
+    image: redis:7-alpine
+    container_name: tunisys-redis
+    restart: unless-stopped
+    init: true
+    command: redis-server --requirepass ${REDIS_PASSWORD:-tunisys_dev_pwd}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks: [tunisys-net]
+
+  # ─────────── RECHERCHE FULL-TEXT / CVTHÈQUE ───────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: tunisys-elasticsearch
+    restart: unless-stopped
+    init: true
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    # NOTE : vm.max_map_count doit etre fixe au niveau de la VM WSL2 elle-meme,
+    # pas au niveau du conteneur (le namespace kernel n'est pas isolable ici sous
+    # Docker Desktop/WSL2). Voir windows-installer/install-docker-prerequisites.ps1
+    # qui l'applique automatiquement avant le deploiement, ou lancez manuellement :
+    #   wsl -d docker-desktop sysctl -w vm.max_map_count=262144
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks: [tunisys-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+
+  # ─────────── EVENT BROKER (notifications, changements d'étape) ───────────
+  # Kafka en mode KRaft (Apache Kafka >= 3.7, image officielle) : plus besoin
+  # de Zookeeper. Les anciennes images Bitnami taguées (bitnami/kafka:3.7,
+  # bitnami/zookeeper:3.9) ont été retirées de Docker Hub gratuit mi-2025.
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: tunisys-kafka
+    restart: unless-stopped
+    init: true
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: "dTFmVGpQZzZUS20wZ0d6Zg=="
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks: [tunisys-net]
+
+  # ─────────── LLM ON-PREMISE (aucune donnée envoyée à un tiers) ───────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tunisys-ollama
+    restart: unless-stopped
+    init: true
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks: [tunisys-net]
+    # GPU NVIDIA (optionnel) : décommenter si carte compatible + nvidia-container-toolkit installé
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Tire automatiquement le modèle au premier démarrage (llama3:8b par défaut)
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: tunisys-ollama-init
+    depends_on: [ollama]
+    networks: [tunisys-net]
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "sleep 5 &&
+       OLLAMA_HOST=ollama:11434 ollama pull ${OLLAMA_MODEL:-llama3:8b} &&
+       echo 'Modèle LLM pret.'"
+    restart: "no"
+
+  # ─────────── MICROSERVICE IA (parsing + scoring, Python/FastAPI) ───────────
+  ia-service:
+    build:
+      context: ./ia-service
+    container_name: tunisys-ia-service
+    restart: unless-stopped
+    init: true
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3:8b}
+    ports:
+      - "8000:8000"
+    depends_on: [ollama]
+    networks: [tunisys-net]
+
+  # ─────────── BACKEND CORE ATS (Java 21 / Spring Boot 3.3) ───────────
+  backend:
+    build:
+      context: ./backend
+    container_name: tunisys-backend
+    restart: unless-stopped
+    init: true
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-tunisys_ats}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-tunisys}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-tunisys_dev_pwd}
+      SPRING_DATA_MONGODB_URI: mongodb://${MONGO_USER:-tunisys}:${MONGO_PASSWORD:-tunisys_dev_pwd}@mongo:27017/tunisys_cv?authSource=admin
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-tunisys_dev_pwd}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      IA_SERVICE_URL: http://ia-service:8000
+      JWT_SECRET: ${JWT_SECRET:-change_this_secret_in_production_please_0123456789}
+      APP_CORS_ORIGIN: http://localhost:4200
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_AUTH: ${SMTP_AUTH:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      NOTIF_EMAIL_FROM: ${NOTIF_EMAIL_FROM:-no-reply@tunisys.com}
+      SMS_PROVIDER: ${SMS_PROVIDER:-none}
+      APP_PUBLIC_BASE_URL: ${APP_PUBLIC_BASE_URL:-http://localhost:4200}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+      mailhog:
+        condition: service_started
+      # service_started (pas service_healthy) : le module CVtheque appelle l'API ES
+      # avec gestion d'echec silencieuse (voir ElasticsearchIndexService), donc on
+      # ne bloque pas tout le stack sur son JVM warmup parfois lent sous WSL2.
+      elasticsearch:
+        condition: service_started
+    networks: [tunisys-net]
+
+  # ─────────── FRONTEND (Angular 19, servi par Nginx) ───────────
+  frontend:
+    build:
+      context: ./frontend
+    container_name: tunisys-frontend
+    restart: unless-stopped
+    init: true
+    ports:
+      - "4200:80"
+    depends_on: [backend]
+    networks: [tunisys-net]
+
+  # ─────────── EMAIL (MailHog en dev : boite mail locale, aucun compte requis) ───────────
+  # En production, ignorez ce conteneur et pointez SMTP_HOST/PORT/USERNAME/PASSWORD
+  # dans .env vers votre serveur SMTP interne ou un fournisseur (SendGrid, etc.).
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: tunisys-mailhog
+    restart: unless-stopped
+    init: true
+    ports:
+      - "1025:1025"   # port SMTP (utilise par le backend)
+      - "8025:8025"   # interface web pour consulter les emails recus
+    networks: [tunisys-net]
+
+  # ─────────── UI D'ADMINISTRATION DB (pratique en dev) ───────────
+  adminer:
+    image: adminer:latest
+    container_name: tunisys-adminer
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8081:8080"
+    networks: [tunisys-net]

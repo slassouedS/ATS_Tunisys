@@ -1,0 +1,94 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: tunisys-ats-backend
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/tunisys_ats}
+    username: ${SPRING_DATASOURCE_USERNAME:tunisys}
+    password: ${SPRING_DATASOURCE_PASSWORD:tunisys_dev_pwd}
+    hikari:
+      maximum-pool-size: 15
+      minimum-idle: 3
+
+  jpa:
+    hibernate:
+      ddl-auto: update       # en production : préférer Flyway/Liquibase + "validate"
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://tunisys:tunisys_dev_pwd@localhost:27017/tunisys_cv?authSource=admin}
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: 6379
+      password: ${SPRING_REDIS_PASSWORD:tunisys_dev_pwd}
+
+  mail:
+    host: ${SMTP_HOST:mailhog}
+    port: ${SMTP_PORT:1025}
+    username: ${SMTP_USERNAME:}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${SMTP_AUTH:false}
+          starttls:
+            enable: ${SMTP_STARTTLS:false}
+          connectiontimeout: 3000
+          timeout: 3000
+          writetimeout: 3000
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: tunisys-ats-backend
+      auto-offset-reset: earliest
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        spring.json.value.default.type: java.util.LinkedHashMap
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+app:
+  jwt:
+    secret: ${JWT_SECRET:change_this_secret_in_production_please_0123456789}
+    access-token-ttl-minutes: 15
+    refresh-token-ttl-days: 7
+  cors:
+    allowed-origin: ${APP_CORS_ORIGIN:http://localhost:4200}
+  ia-service:
+    base-url: ${IA_SERVICE_URL:http://localhost:8000}
+  elasticsearch:
+    url: ${ELASTICSEARCH_URL:http://localhost:9200}
+  notifications:
+    email-from: ${NOTIF_EMAIL_FROM:no-reply@tunisys.com}
+    # SMS : aucun fournisseur reel configure par defaut (Twilio/Infobip necessitent
+    # un compte + credentials que vous devez fournir). En attendant, les notifications
+    # SMS sont journalisees (statut SENT_LOG) plutot que reellement envoyees.
+    # Branchez un vrai fournisseur dans SmsService.java une fois vos credentials en main.
+    sms-provider: ${SMS_PROVIDER:none}
+  public-base-url: ${APP_PUBLIC_BASE_URL:http://localhost:4200}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.tunisys.ats: INFO
+    org.springframework.security: WARN
